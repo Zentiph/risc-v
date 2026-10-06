@@ -1,0 +1,8 @@
+# Artifacts
+*.elf
+*.lst
+*.map
+*.o
+
+# IDE
+.vscode/
