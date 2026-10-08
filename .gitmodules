@@ -1,0 +1,3 @@
+[submodule "asm/math"]
+	path = asm/math
+	url = https://github.com/Zentiph/math
