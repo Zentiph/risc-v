@@ -41,8 +41,10 @@ The first file's name (without extension) names the build output: `main.elf`, `m
 
 ### Width wrappers
 
-The `mkrv` bash file also includes two width wrapper functions: `mkrv32` and `mkrv64`, which are equivalent to setting the necessary environment variables for either RV32 or RV64.
+The `mkrv` bash file also includes two width wrapper functions: `mkrv32` and `mkrv64`, which are equivalent to setting the necessary environment variables for either RV32 or RV64, and which mark the choice as made *on purpose*.
 Their usage is the same as `mkrv`.
+
+Bare `mkrv` (no wrapper) still builds something — RV64 by default — but is treated as not having picked a width deliberately. See [width defaulting](#width-defaulting) below.
 
 ### Making breakpoints
 
@@ -60,5 +62,16 @@ To check the registers at a breakpoint, add an `ebreak` instruction and run `mkr
 
 Either of these can be redirected to save it: `mkrv lst main.s math_utils.s > main.lst`
 
-## Notes
-* By default, this project is using RV64. To use RV32, set the corresponding environment variables.
+### Width defaulting
+
+`mkrv` always tells `as` which width it's building for, via `--defsym XLEN=32` or `--defsym XLEN=64`, matching whatever `-march`/`-mabi` it's using. Any `.s` file can branch on this at assemble time:
+
+```asm
+.if XLEN == 64
+        ld      a0, 0(sp)
+.elseif XLEN == 32
+        lw      a0, 0(sp)
+.endif
+```
+
+Calling `mkrv32`/`mkrv64` also passes `--defsym MKRV_EXPLICIT=1`, marking the width as chosen on purpose. Calling bare `mkrv` does not. The shared headers (`rv.inc` and friends) check for this: if `MKRV_EXPLICIT` isn't set, the assembler itself prints a one-line warning reminding you to call `mkrv32`/`mkrv64` instead — build still succeeds, nothing fails, you just get a nudge. This only fires for files that `.include "rv.inc"`; a standalone `.s` file that doesn't pull in the shared headers builds silently at the default width either way.

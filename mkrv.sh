@@ -1,12 +1,28 @@
-# assemble/link/run RISC-V (RV32IM) assembly with the GNU toolchain + QEMU user-mode emulation
-export MKRV_ARCH="${MKRV_ARCH:-rv32im}"
-export MKRV_ABI="${MKRV_ABI:-ilp32}"
+# assemble/link/run RISC-V (RV32 or RV64) assembly with the GNU toolchain + QEMU user-mode emulation
+#
+# Default width: RV64 (see MKRV_ARCH/MKRV_ABI/etc below). Use the mkrv32/mkrv64
+# wrappers to pick a width on purpose -- calling bare `mkrv` still builds RV64,
+# but is treated as *not* having picked a width on purpose: shared headers
+# that `.include "rv.inc"` print a one-line assembler warning reminding you to
+# use mkrv32/mkrv64 instead. See MKRV_EXPLICIT below.
+export MKRV_ARCH="${MKRV_ARCH:-rv64im}"
+export MKRV_ABI="${MKRV_ABI:-lp64}"
 export MKRV_PREFIX="${MKRV_PREFIX:-riscv64-linux-gnu-}"   # also assembles/links RV32
-export MKRV_QEMU="${MKRV_QEMU:-qemu-riscv32}"
-export MKRV_LDEMU="${MKRV_LDEMU:-elf32lriscv}"   # linker -m for RV32; elf64lriscv for RV64
+export MKRV_QEMU="${MKRV_QEMU:-qemu-riscv64}"
+export MKRV_LDEMU="${MKRV_LDEMU:-elf64lriscv}"   # linker -m for RV64; elf32lriscv for RV32
 export MKRV_GDB="${MKRV_GDB:-gdb-multiarch}"
-export MKRV_GDBARCH="${MKRV_GDBARCH:-riscv:rv32}"
+export MKRV_GDBARCH="${MKRV_GDBARCH:-riscv:rv64}"
 # export MKRV_COLS=4          # registers per row in regs/all mode
+#
+# MKRV_EXPLICIT: unset by default, set to 1 by mkrv32/mkrv64. Passed to `as`
+# as --defsym MKRV_EXPLICIT=1 so .inc files can tell "someone called mkrv32/
+# mkrv64" apart from "someone called bare mkrv and got the default width".
+export MKRV_EXPLICIT="${MKRV_EXPLICIT:-}"
+#
+# MKRV_XLEN: normally inferred from MKRV_ABI (ilp32* -> 32, lp64* -> 64).
+# Set this directly if you use an ABI string mkrv can't infer from (shouldn't
+# be needed for ilp32/ilp32f/ilp32d/lp64/lp64f/lp64d).
+export MKRV_XLEN="${MKRV_XLEN:-}"
 
 # Formats a register dump (gdb "info registers" output) the same way mkmips
 # does: a grid, tagged so it can't be mistaken for program output.
@@ -40,7 +56,7 @@ mkrv() {
   if (( $# < 2 )) || [[ $1 == -h || $1 == --help ]]; then
     cat <<'HELP'
 usage: mkrv <mode> <file1.s> [file2.s ...]
-       mkrv32 / mkrv64 <mode> <files...>   same modes, fixed to RV32I / RV64I
+       mkrv32 / mkrv64 <mode> <files...>   same modes, pinned to RV32 / RV64
 
   run     (default-ish) assemble, link, and execute
   stats   run, then print the instruction count
@@ -63,6 +79,11 @@ usage: mkrv <mode> <file1.s> [file2.s ...]
   In 'debug', set a breakpoint with the label name (break gcd) or a raw
   address with an asterisk (break *0x10084) -- break 0x10084 without the
   asterisk tries to look up a function named that and fails.
+
+  Width: bare `mkrv` builds RV64 by default but hasn't picked a width on
+  purpose -- use `mkrv32`/`mkrv64` to pin one. Either way, `as` is always
+  given --defsym XLEN=32/64 matching -march/-mabi, so .s files can branch
+  on build width with `.if XLEN == 64` / `.elseif XLEN == 32`.
 HELP
     return 0
   fi
@@ -94,10 +115,24 @@ HELP
     command -v "$f" >/dev/null || { print -u2 "mkrv: $f not found"; return 1 }
   done
 
+  # Figure out XLEN (32/64) so `as` can be told via --defsym, and every
+  # .s file (via rv.inc) can branch on build width with .if XLEN == 64/32.
+  local xlen="$MKRV_XLEN"
+  if [[ -z $xlen ]]; then
+    case $MKRV_ABI in
+      ilp32*) xlen=32 ;;
+      lp64*)  xlen=64 ;;
+      *) print -u2 "mkrv: can't infer XLEN from MKRV_ABI='$MKRV_ABI' -- set MKRV_XLEN=32 or 64"; return 1 ;;
+    esac
+  fi
+  local -a defsyms
+  defsyms=(--defsym "XLEN=$xlen")
+  [[ -n $MKRV_EXPLICIT ]] && defsyms+=(--defsym "MKRV_EXPLICIT=1")
+
   objs=()
   for f in "${srcs[@]}"; do
     stem=${builddir}/${f:t:r}
-    "${MKRV_PREFIX}as" -march="$MKRV_ARCH" -mabi="$MKRV_ABI" -o "$stem.o" "$f" \
+    "${MKRV_PREFIX}as" -march="$MKRV_ARCH" -mabi="$MKRV_ABI" "${defsyms[@]}" -o "$stem.o" "$f" \
       || return 1
     objs+=("$stem.o")
   done
@@ -198,8 +233,10 @@ _mkrv() {
 command -v compdef >/dev/null && compdef _mkrv mkrv mkrv32 mkrv64
 
 # ---------- fixed-width wrappers ----------
-# mkrv32 / mkrv64 always target one width, regardless of the MKRV_* settings.
-# The base ISA (extensions) can still be overridden per width, e.g.
+# mkrv32 / mkrv64 always target one width, regardless of the MKRV_* settings,
+# and mark the choice as made on purpose (MKRV_EXPLICIT=1) so shared headers
+# don't print the "no width chosen" warning. The base ISA (extensions) can
+# still be overridden per width, e.g.
 #   export MKRV64_ARCH=rv64im   # allow mul/div in mkrv64 builds
 mkrv32() {
   local MKRV_ARCH=${MKRV32_ARCH:-rv32i}
@@ -207,6 +244,7 @@ mkrv32() {
   local MKRV_QEMU=qemu-riscv32
   local MKRV_LDEMU=elf32lriscv
   local MKRV_GDBARCH=riscv:rv32
+  local MKRV_EXPLICIT=1
   mkrv "$@"
 }
 
@@ -216,5 +254,6 @@ mkrv64() {
   local MKRV_QEMU=qemu-riscv64
   local MKRV_LDEMU=elf64lriscv
   local MKRV_GDBARCH=riscv:rv64
+  local MKRV_EXPLICIT=1
   mkrv "$@"
 }
